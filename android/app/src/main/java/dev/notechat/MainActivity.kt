@@ -2071,50 +2071,101 @@ class MainActivity : Activity(), UiColorSource {
         } catch(error:Exception) { tell(error.message ?: "Cannot pause this recording") }
     }
     private fun stopRecording(send:Boolean) {
-        if(recorder==null)return
-        val file=recordingFile; val elapsed=recordingElapsed()
-        handler.removeCallbacks(mediaTick)
-        try { recorder?.stop() } catch(_:Exception) { recorder?.release(); recorder=null; file?.delete(); recordingFile=null; if(resumed)render(); return }
-        recorder?.release(); recorder=null; recordingFile=null; recordingPaused=false; recordingLocked=false
-        if(send && file!=null && elapsed>500) {
-            val wave=amplitudes.toList().let { samples->(0 until minOf(32,samples.size)).map { i->samples.drop(i*samples.size/32).take((samples.size/32).coerceAtLeast(1)).maxOrNull() ?: 0 } }
-            val category=shown?.categories?.firstOrNull { it.id==route }?.id
-        val destinationChat=route.removePrefix("chat:").takeIf { route.startsWith("chat:") }
-            val replyId=reply; reply=null
-            work("") { try { val attachment=file.inputStream().use { vault.importMedia(it,"Voice message.m4a","audio/mp4",elapsed) }.copy(waveform=wave); engine!!.state=engine!!.state.copy(messages=engine!!.state.messages+Message(attachment=attachment,replyTo=replyId,category=category,manual=category!=null,approved=category!=null,chatId=destinationChat,reason="Voice messages are manually tagged.")); followLatest=true } finally { file.delete() } }
-        } else { file?.delete(); if(resumed)render() }
+    if(recorder==null)return
+
+    val file=recordingFile
+    val elapsed=recordingElapsed()
+    handler.removeCallbacks(mediaTick)
+
+    try {
+        recorder?.stop()
+    } catch(_:Exception) {
+        recorder?.release()
+        recorder=null
+        file?.delete()
+        recordingFile=null
+        if(resumed)render()
+        return
     }
-    private fun openAttachment(m:Message) { if(m.attachment?.mime?.startsWith("audio/")==true)playVoice(m) else if(m.attachment?.mime?.startsWith("image/")==true)showImage(m) else shareAttachment(m,true) }
-    private fun playVoice(m:Message,startAt:Int=0) {
-        val a=m.attachment ?: return
-        if(playingId==m.id && player!=null && !playbackLoading) {
-            try { if(player!!.isPlaying)player!!.pause() else if(acquireAudioFocus())player!!.start(); refreshVoiceViews() } catch(_:Exception) { stopPlayback() }
-            return
+
+    recorder?.release()
+    recorder=null
+    recordingFile=null
+    recordingPaused=false
+    recordingLocked=false
+
+    if(send && file!=null && elapsed>500) {
+        val wave=amplitudes.toList().let { samples->
+            (0 until minOf(32,samples.size)).map { i->
+                samples.drop(i*samples.size/32)
+                    .take((samples.size/32).coerceAtLeast(1))
+                    .maxOrNull() ?: 0
+            }
         }
-        if(playingId==m.id && playbackLoading)return
-        stopPlayback(); playingId=m.id; playbackLoading=true; pendingSeek=startAt; refreshVoiceViews()
-        val generation=sessionGeneration
-        worker.execute { var file:File?=null
-            try {
-                file=File(cacheDir,"play-${a.file}.m4a"); vault.readMedia(a).use { input->file.outputStream().use { input.copyTo(it) } }
-                val ready=file
-                runOnUiThread {
-                    if(!resumed || generation!=sessionGeneration || playingId!=m.id) { ready.delete(); return@runOnUiThread }
-                    try {
-                        playbackFile=ready
-                        player=MediaPlayer().apply {
-                            setAudioAttributes(audioAttributes); setDataSource(ready.absolutePath)
-                            setOnPreparedListener { active->if(playingId==m.id && resumed) { playbackLoading=false; voiceDurations[m.id]=active.duration; if(pendingSeek>0)active.seekTo(pendingSeek); if(acquireAudioFocus()) { active.playbackParams=active.playbackParams.setSpeed(playbackSpeed); active.start() }; handler.removeCallbacks(mediaTick); handler.post(mediaTick); refreshVoiceViews() } else stopPlayback() }
-                            setOnCompletionListener { stopPlayback() }
-                            setOnErrorListener { _,_,_->stopPlayback(); true }
-                            prepareAsync()
-                        }
-                    } catch(error:Exception) { stopPlayback(); tell(error.message ?: "Cannot play this recording") }
+
+        val category=shown?.categories
+            ?.firstOrNull { it.id==route }?.id
+        val destinationChat=route.removePrefix("chat:")
+            .takeIf { route.startsWith("chat:") }
+        val replyId=reply
+        reply=null
+
+        var savedMessage:Message?=null
+
+        work(
+            message="",
+            onSuccess={
+                val saved=savedMessage
+                if(saved!=null && resumed &&
+                    VoiceTranscriber.installed(this)) {
+                    if(TranscriptionService.active()) {
+                        toast(
+                            "Recording saved. Another transcription is running; " +
+                            "tap Transcribe on this recording afterward."
+                        )
+                    } else {
+                        transcribe(saved)
+                    }
                 }
-            } catch(error:Exception) { file?.delete(); runOnUiThread { stopPlayback(); tell(error.message ?: "Cannot read this recording") } }
+            }
+        ) {
+            try {
+                val attachment=file.inputStream().use {
+                    vault.importMedia(
+                        it,
+                        "Voice message.m4a",
+                        "audio/mp4",
+                        elapsed
+                    )
+                }.copy(waveform=wave)
+
+                val newMessage=Message(
+                    attachment=attachment,
+                    replyTo=replyId,
+                    category=category,
+                    manual=category!=null,
+                    approved=category!=null,
+                    chatId=destinationChat,
+                    reason="Voice messages are manually tagged."
+                )
+
+                engine!!.state=engine!!.state.copy(
+                    messages=engine!!.state.messages+newMessage
+                )
+
+                savedMessage=newMessage
+                followLatest=true
+            } finally {
+                file.delete()
+            }
         }
+    } else {
+        file?.delete()
+        if(resumed)render()
     }
-    private fun seekVoice(m:Message,position:Int) {
+} 
+                              
+private fun seekVoice(m:Message,position:Int) {
         if(playingId==m.id) { pendingSeek=position; if(!playbackLoading)try { player?.seekTo(position) } catch(_:Exception) { } }
         else playVoice(m,position)
     }
